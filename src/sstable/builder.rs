@@ -32,7 +32,7 @@ use super::bloom::{BloomFilterBuilder, DEFAULT_BITS_PER_KEY};
 const MAGIC: u64 = 0x5354524154414442; // "STRATADB"
 
 /// Footer size in bytes.
-const FOOTER_SIZE: usize = 48;
+pub const FOOTER_SIZE: usize = 48;
 
 /// SSTable builder.
 pub struct SSTableBuilder {
