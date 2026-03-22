@@ -29,13 +29,13 @@ pub struct BlockBuilder {
 impl BlockBuilder {
     /// Create a new block builder.
     pub fn new() -> Self {
-        let builder = Self {
+        
+        Self {
             buffer: Vec::new(),
             restarts: vec![0], // First entry is always a restart
             last_key: Vec::new(),
             counter: 0,
-        };
-        builder
+        }
     }
 
     /// Add a key-value pair.
@@ -43,7 +43,7 @@ impl BlockBuilder {
         let key_bytes = key.as_bytes();
 
         // Determine shared prefix length
-        let shared = if self.counter % RESTART_INTERVAL == 0 {
+        let shared = if self.counter.is_multiple_of(RESTART_INTERVAL) {
             // Restart point - no prefix sharing
             self.restarts.push(self.buffer.len() as u32);
             0
@@ -180,7 +180,7 @@ impl Block {
         let mut right = self.num_restarts;
 
         while left < right {
-            let mid = left + (right - left + 1) / 2;
+            let mid = left + (right - left).div_ceil(2);
             let restart_offset = self.restart(mid);
 
             // Decode key at restart point (full key, no shared prefix)
@@ -233,7 +233,7 @@ impl Block {
                 return BlockIterator {
                     block: self,
                     offset: entry_offset,
-                    key: key,
+                    key,
                 };
             }
 

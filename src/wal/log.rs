@@ -20,7 +20,7 @@ impl WalWriter {
     pub fn new(path: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
+            
             .append(true)
             .open(path)?;
 
@@ -122,15 +122,14 @@ impl WalReader {
 
         loop {
             // Read new block if needed
-            if self.block_offset >= self.block_len {
-                if !self.read_block()? {
+            if self.block_offset >= self.block_len
+                && !self.read_block()? {
                     self.eof = true;
                     if in_fragmented {
                         return Err(crate::Error::Corruption("truncated record".into()));
                     }
                     return Ok(None);
                 }
-            }
 
             // Skip zero padding
             while self.block_offset < self.block_len && self.block[self.block_offset] == 0 {
