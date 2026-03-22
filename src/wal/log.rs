@@ -1,7 +1,7 @@
 //! Write-ahead log implementation.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::Result;
@@ -9,6 +9,7 @@ use super::record::{LogRecord, RecordType, BLOCK_SIZE, HEADER_SIZE};
 
 /// WAL writer.
 pub struct WalWriter {
+    #[allow(dead_code)]
     path: PathBuf,
     file: BufWriter<File>,
     block_offset: usize,
@@ -84,6 +85,7 @@ pub struct WalReader {
     file: BufReader<File>,
     block: Vec<u8>,
     block_offset: usize,
+    block_len: usize, // Actual bytes in block
     eof: bool,
 }
 
@@ -94,9 +96,19 @@ impl WalReader {
         Ok(Self {
             file: BufReader::new(file),
             block: vec![0u8; BLOCK_SIZE],
-            block_offset: BLOCK_SIZE, // Force read on first access
+            block_offset: 0,
+            block_len: 0, // Empty, force read on first access
             eof: false,
         })
+    }
+
+    /// Read the next block (or partial block at EOF).
+    fn read_block(&mut self) -> Result<bool> {
+        self.block.fill(0);
+        let n = self.file.read(&mut self.block)?;
+        self.block_len = n;
+        self.block_offset = 0;
+        Ok(n > 0)
     }
 
     /// Read the next record.
@@ -110,32 +122,44 @@ impl WalReader {
 
         loop {
             // Read new block if needed
-            if self.block_offset >= BLOCK_SIZE {
-                match self.file.read_exact(&mut self.block) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        self.eof = true;
-                        if in_fragmented {
-                            return Err(crate::Error::Corruption("truncated record".into()));
-                        }
-                        return Ok(None);
+            if self.block_offset >= self.block_len {
+                if !self.read_block()? {
+                    self.eof = true;
+                    if in_fragmented {
+                        return Err(crate::Error::Corruption("truncated record".into()));
                     }
-                    Err(e) => return Err(e.into()),
+                    return Ok(None);
                 }
-                self.block_offset = 0;
             }
 
             // Skip zero padding
-            while self.block_offset < BLOCK_SIZE && self.block[self.block_offset] == 0 {
+            while self.block_offset < self.block_len && self.block[self.block_offset] == 0 {
                 self.block_offset += 1;
             }
 
-            if self.block_offset >= BLOCK_SIZE {
+            if self.block_offset >= self.block_len {
+                // Need more data
+                if !self.read_block()? {
+                    self.eof = true;
+                    if in_fragmented {
+                        return Err(crate::Error::Corruption("truncated record".into()));
+                    }
+                    return Ok(None);
+                }
                 continue;
             }
 
+            // Check if we have enough data for a header
+            if self.block_offset + HEADER_SIZE > self.block_len {
+                self.eof = true;
+                if in_fragmented {
+                    return Err(crate::Error::Corruption("truncated record".into()));
+                }
+                return Ok(None);
+            }
+
             // Decode record
-            let record = LogRecord::decode(&self.block[self.block_offset..])?;
+            let record = LogRecord::decode(&self.block[self.block_offset..self.block_len])?;
             self.block_offset += HEADER_SIZE + record.data.len();
 
             result.extend_from_slice(&record.data);

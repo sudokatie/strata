@@ -98,26 +98,28 @@ impl SkipList {
         self.insert_node(new_node);
     }
 
-    fn insert_node(&mut self, mut new_node: Box<Node>) {
-        // Simple insertion - find position and insert
-        // This is O(n) for simplicity; real skip list uses forward pointers
+    fn insert_node(&mut self, new_node: Box<Node>) {
+        // Simple insertion at level 0 only for correctness
+        // TODO: Full skip list with multi-level pointers for O(log n)
         let mut current = &mut self.head;
 
-        for level in (0..self.height).rev() {
-            while let Some(ref next) = current.forward[level] {
-                if next.key < new_node.key {
-                    current = current.forward[level].as_mut().unwrap();
-                } else {
-                    break;
-                }
-            }
-
-            if level < new_node.forward.len() {
-                new_node.forward[level] = current.forward[level].take();
-                current.forward[level] = Some(new_node);
-                return;
+        // Find position: advance while next < new_node
+        while current.forward[0].is_some() {
+            let should_advance = {
+                let next = current.forward[0].as_ref().unwrap();
+                next.key < new_node.key
+            };
+            if should_advance {
+                current = current.forward[0].as_mut().unwrap();
+            } else {
+                break;
             }
         }
+
+        // Insert after current
+        let mut new_node = new_node;
+        new_node.forward[0] = current.forward[0].take();
+        current.forward[0] = Some(new_node);
     }
 
     /// Get the latest value for a key.
@@ -173,7 +175,7 @@ impl SkipList {
     }
 
     /// Iterate over all entries in order.
-    pub fn iter(&self) -> SkipListIterator {
+    pub fn iter(&self) -> SkipListIterator<'_> {
         SkipListIterator {
             current: self.head.forward[0].as_ref(),
         }
