@@ -2,6 +2,8 @@
 
 pub mod merge;
 pub mod picker;
+pub mod leveled;
 
 pub use merge::{MergeIterator, MergeEntry, entries_to_merge, kv_to_merge};
 pub use picker::{CompactionPicker, CompactionInput, L0_COMPACTION_TRIGGER};
+pub use leveled::{LeveledCompaction, CompactionResult};
