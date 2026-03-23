@@ -19,6 +19,8 @@ hex = "0.4"
 [dev-dependencies]
 tempfile = "3.10"
 
+# Benchmark: cargo run --example bench --release
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -1,74 +1,158 @@
-# Strata
+# strata
 
-An LSM-tree storage engine built from scratch in Rust.
+An LSM-tree storage engine in Rust. Built from scratch, no dependencies on existing storage engines.
 
-## What This Is
+## Why This Exists
 
-Strata implements the Log-Structured Merge-tree architecture used by RocksDB, LevelDB, Cassandra, and many modern databases. It's optimized for write-heavy workloads with good read performance through compaction.
-
-## Architecture
-
-```
-Write: Put(k,v) → WAL → MemTable → [flush] → SSTable (L0)
-                              ↓
-Compaction: L0 → L1 → L2 → ... → Ln
-                              ↓
-Read: Get(k) → MemTable → L0 → L1 → ... → Ln
-       (bloom filters skip empty SSTables)
-```
+Because understanding how databases work means building one. Strata implements the core concepts from LevelDB/RocksDB: write-ahead logging, memtables, sorted string tables, compaction, and MVCC.
 
 ## Features
 
-- Write-ahead log for durability
-- Skip list MemTable for fast writes
-- SSTable files with block-based storage
-- Bloom filters for negative lookups
-- Leveled compaction
-- Snapshot isolation
-- Concurrent reads
+- **Write-Ahead Log (WAL)** - Durability before acknowledging writes
+- **MemTable with Skip List** - Fast in-memory writes
+- **SSTable with Bloom Filters** - Efficient on-disk storage
+- **Leveled Compaction** - Background merging to reclaim space
+- **MVCC with Snapshots** - Point-in-time reads
+- **Interactive CLI** - REPL for testing and debugging
 
 ## Quick Start
 
 ```bash
 # Build
-cargo build
+cargo build --release
 
-# Run tests
-cargo test
+# Open a database
+./target/release/strata open ./mydb
 
-# Open database REPL
-cargo run -- open ./data
+# In the REPL
+strata> put name Alice
+OK
+strata> get name
+Alice
+strata> delete name
+OK
+strata> quit
 ```
 
 ## Usage
+
+### As a Library
 
 ```rust
 use strata::{DB, Options, Key, Value};
 
 // Open database
-let db = DB::open("./data", Options::default())?;
+let db = DB::open("./mydb", Options::default())?;
 
 // Write
 db.put(&Key::from("hello"), &Value::from("world"))?;
 
 // Read
-let value = db.get(&Key::from("hello"))?;
+match db.get(&Key::from("hello"))? {
+    Some(value) => println!("{}", std::str::from_utf8(value.as_bytes())?),
+    None => println!("Not found"),
+}
 
 // Delete
 db.delete(&Key::from("hello"))?;
+
+// Flush to disk
+db.flush()?;
 ```
 
-## Performance
+### CLI Commands
 
-Target metrics for v0.1.0:
-- Write throughput: > 100K ops/sec
-- Point read latency: < 100μs (MemTable hit)
-- Point read latency: < 1ms (SSTable with bloom)
-- Range scan: > 10K keys/sec
+| Command | Description |
+|---------|-------------|
+| `put <key> <value>` | Store a key-value pair |
+| `get <key>` | Retrieve a value |
+| `delete <key>` | Delete a key |
+| `flush` | Force flush to disk |
+| `compact` | Trigger compaction |
+| `stats` | Show database info |
+| `quit` | Exit |
 
-## Project Status
+### Batch Mode
 
-v0.1.0 - In Development
+```bash
+# Run commands from a file
+./target/release/strata batch --db ./mydb commands.txt
+```
+
+Where `commands.txt` contains:
+```
+put key1 value1
+put key2 value2
+flush
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│                   Client                     │
+└─────────────────┬───────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────┐
+│                    DB                        │
+│  ┌─────────────┐  ┌─────────────────────┐   │
+│  │  MemTable   │  │  Immutable MemTable │   │
+│  │ (Skip List) │  │   (being flushed)   │   │
+│  └─────────────┘  └─────────────────────┘   │
+│         │                    │              │
+│         ▼                    ▼              │
+│  ┌─────────────────────────────────────┐    │
+│  │              WAL                     │    │
+│  └─────────────────────────────────────┘    │
+└─────────────────┬───────────────────────────┘
+                  │ Flush
+┌─────────────────▼───────────────────────────┐
+│              SSTables                        │
+│  ┌─────────────────────────────────────┐    │
+│  │  Level 0 (overlapping)              │    │
+│  ├─────────────────────────────────────┤    │
+│  │  Level 1 (sorted, non-overlapping)  │    │
+│  ├─────────────────────────────────────┤    │
+│  │  Level 2 ...                        │    │
+│  └─────────────────────────────────────┘    │
+└─────────────────────────────────────────────┘
+```
+
+### Key Components
+
+- **MemTable**: In-memory buffer using a skip list for O(log n) inserts
+- **WAL**: Append-only log for crash recovery
+- **SSTable**: Immutable sorted files with bloom filter and index
+- **Compaction**: Background merge of overlapping files
+
+## Benchmarks
+
+```bash
+cargo run --example bench --release
+```
+
+Sample output (varies by hardware):
+```
+Sequential Write: 50,000 ops/sec
+Random Write:     40,000 ops/sec
+Sequential Read:  100,000 ops/sec
+Random Read:      80,000 ops/sec
+```
+
+## Testing
+
+```bash
+cargo test
+```
+
+86+ tests covering:
+- Core types and encoding
+- WAL write/recovery
+- MemTable operations
+- SSTable read/write
+- Compaction
+- Database CRUD
+- Persistence
 
 ## License
 
@@ -76,4 +160,4 @@ MIT
 
 ---
 
-*Built by Katie to understand storage engine internals.*
+*Built for learning. Use in production at your own risk.*
