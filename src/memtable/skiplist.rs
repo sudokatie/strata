@@ -177,7 +177,7 @@ impl SkipList {
     /// Iterate over all entries in order.
     pub fn iter(&self) -> SkipListIterator<'_> {
         SkipListIterator {
-            current: self.head.forward[0].as_ref(),
+            current: self.head.forward[0].as_deref(),
         }
     }
 }
@@ -190,7 +190,7 @@ impl Default for SkipList {
 
 /// Iterator over skip list entries.
 pub struct SkipListIterator<'a> {
-    current: Option<&'a Box<Node>>,
+    current: Option<&'a Node>,
 }
 
 impl<'a> Iterator for SkipListIterator<'a> {
@@ -204,7 +204,7 @@ impl<'a> Iterator for SkipListIterator<'a> {
             sequence: node.key.sequence,
             entry_type: node.key.entry_type,
         };
-        self.current = node.forward[0].as_ref();
+        self.current = node.forward[0].as_deref();
         Some(entry)
     }
 }

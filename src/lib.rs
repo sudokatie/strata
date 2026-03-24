@@ -16,4 +16,4 @@ pub mod db;
 pub use error::{Error, Result};
 pub use types::{Key, Value, Entry, EntryType, Sequence};
 pub use options::{Options, ReadOptions, WriteOptions, Compression};
-pub use db::DB;
+pub use db::{DB, DBStats, LevelStats, Snapshot};

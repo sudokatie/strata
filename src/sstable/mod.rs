@@ -1,5 +1,6 @@
 //! SSTable implementation.
 
+#[allow(clippy::module_inception)]
 pub mod block;
 pub mod bloom;
 pub mod builder;

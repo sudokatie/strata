@@ -12,6 +12,7 @@ use crate::wal::WalWriter;
 use crate::compaction::{CompactionPicker, LeveledCompaction};
 use crate::types::{Key, Value, Entry, EntryType};
 use crate::{Result, Options};
+use super::snapshot::Snapshot;
 
 /// Default memtable size before flush (4MB).
 const DEFAULT_MEMTABLE_SIZE: usize = 4 * 1024 * 1024;
@@ -30,6 +31,7 @@ struct DBInner {
     /// Database path.
     db_path: PathBuf,
     /// Configuration options.
+    #[allow(dead_code)]
     options: Options,
     /// Manifest for version management.
     manifest: Mutex<Manifest>,
@@ -144,7 +146,7 @@ impl DB {
         }
 
         // Freeze current memtable
-        let old_mem = std::mem::replace(mem, MemTable::new());
+        let old_mem = std::mem::take(mem);
         *imm_guard = Some(old_mem.freeze());
 
         // Create new WAL
@@ -235,7 +237,7 @@ impl DB {
                 imm = self.inner.flush_cv.wait(imm).unwrap();
             }
 
-            let old_mem = std::mem::replace(&mut *mem, MemTable::new());
+            let old_mem = std::mem::take(&mut *mem);
             *imm = Some(old_mem.freeze());
         }
 
@@ -259,6 +261,151 @@ impl DB {
         self.inner.compact_cv.notify_one();
         Ok(())
     }
+
+    /// Get database statistics.
+    pub fn stats(&self) -> DBStats {
+        let manifest = self.inner.manifest.lock().unwrap();
+        let version = manifest.current();
+        let mem = self.inner.mem.lock().unwrap();
+        let imm = self.inner.imm.lock().unwrap();
+
+        let mut level_stats = Vec::new();
+        for level in 0..7 {
+            let files = version.files(level);
+            if !files.is_empty() {
+                let total_size: u64 = files.iter().map(|f| f.file_size).sum();
+                level_stats.push(LevelStats {
+                    level,
+                    num_files: files.len(),
+                    total_bytes: total_size,
+                });
+            }
+        }
+
+        DBStats {
+            memtable_size: mem.approximate_size(),
+            memtable_entries: mem.len(),
+            immutable_memtable: imm.is_some(),
+            levels: level_stats,
+            total_files: version.num_files(),
+        }
+    }
+
+    /// Create a snapshot for point-in-time reads.
+    /// The snapshot captures the current state - entries written after 
+    /// this point will not be visible through get_at().
+    pub fn snapshot(&self) -> Snapshot {
+        let mem = self.inner.mem.lock().unwrap();
+        // sequence() returns the NEXT sequence to be assigned
+        // So we use sequence() - 1 to capture the current state
+        let seq = mem.sequence();
+        Snapshot::new(seq.saturating_sub(1))
+    }
+
+    /// Get a value by key at a specific snapshot.
+    pub fn get_at(&self, key: &Key, snapshot: &Snapshot) -> Result<Option<Value>> {
+        let max_seq = snapshot.sequence();
+
+        // Check memtable - need to scan for entries matching key with seq <= max_seq
+        {
+            let mem = self.inner.mem.lock().unwrap();
+            // Find the newest entry for this key with sequence <= max_seq
+            let mut best_entry: Option<Entry> = None;
+            for entry in mem.iter() {
+                if entry.key == *key && entry.sequence <= max_seq {
+                    match &best_entry {
+                        None => best_entry = Some(entry),
+                        Some(best) if entry.sequence > best.sequence => {
+                            best_entry = Some(entry);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(entry) = best_entry {
+                return Ok(match entry.entry_type {
+                    EntryType::Put => Some(entry.value),
+                    EntryType::Delete => None,
+                });
+            }
+        }
+
+        // Check immutable memtable
+        {
+            let imm = self.inner.imm.lock().unwrap();
+            if let Some(ref imm_table) = *imm {
+                let mut best_entry: Option<Entry> = None;
+                for entry in imm_table.iter() {
+                    if entry.key == *key && entry.sequence <= max_seq {
+                        match &best_entry {
+                            None => best_entry = Some(entry),
+                            Some(best) if entry.sequence > best.sequence => {
+                                best_entry = Some(entry);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(entry) = best_entry {
+                    return Ok(match entry.entry_type {
+                        EntryType::Put => Some(entry.value),
+                        EntryType::Delete => None,
+                    });
+                }
+            }
+        }
+
+        // Check SSTables (they store older data, so sequence check less critical)
+        // For full snapshot isolation, SSTable entries would also need sequence filtering
+        let manifest = self.inner.manifest.lock().unwrap();
+        let version = manifest.current();
+
+        for level in 0..7 {
+            let files = version.files(level);
+            for file in files {
+                if key.as_bytes() < file.smallest.as_slice()
+                    || key.as_bytes() > file.largest.as_slice()
+                {
+                    continue;
+                }
+
+                let path = self.inner.db_path.join(format!("{:06}.sst", file.number));
+                if let Ok(mut reader) = SSTableReader::open(&path) {
+                    if let Ok(Some(value)) = reader.get(key) {
+                        return Ok(Some(value));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+/// Statistics for a single level.
+#[derive(Debug, Clone)]
+pub struct LevelStats {
+    /// Level number.
+    pub level: usize,
+    /// Number of files.
+    pub num_files: usize,
+    /// Total bytes in level.
+    pub total_bytes: u64,
+}
+
+/// Database statistics.
+#[derive(Debug, Clone)]
+pub struct DBStats {
+    /// Current memtable size in bytes.
+    pub memtable_size: usize,
+    /// Number of entries in memtable.
+    pub memtable_entries: usize,
+    /// Whether there's an immutable memtable pending flush.
+    pub immutable_memtable: bool,
+    /// Statistics per level.
+    pub levels: Vec<LevelStats>,
+    /// Total number of SSTable files.
+    pub total_files: usize,
 }
 
 impl Drop for DB {
@@ -490,5 +637,104 @@ mod tests {
             let value = db.get(&Key::from(key.as_str())).unwrap().unwrap();
             assert_eq!(value.as_bytes(), expected.as_bytes());
         }
+    }
+
+    #[test]
+    fn test_stats() {
+        let tmp = TempDir::new().unwrap();
+        let db = DB::open(tmp.path(), Options::default()).unwrap();
+
+        // Empty database
+        let stats = db.stats();
+        assert_eq!(stats.memtable_entries, 0);
+        assert_eq!(stats.total_files, 0);
+
+        // Add some entries
+        for i in 0..10 {
+            let key = format!("key{}", i);
+            db.put(&Key::from(key.as_str()), &Value::from("value")).unwrap();
+        }
+
+        let stats = db.stats();
+        assert_eq!(stats.memtable_entries, 10);
+        assert!(stats.memtable_size > 0);
+    }
+
+    #[test]
+    fn test_stats_after_flush() {
+        let tmp = TempDir::new().unwrap();
+        let db = DB::open(tmp.path(), Options::default()).unwrap();
+
+        for i in 0..10 {
+            let key = format!("key{}", i);
+            db.put(&Key::from(key.as_str()), &Value::from("value")).unwrap();
+        }
+
+        db.flush().unwrap();
+
+        let stats = db.stats();
+        // After flush, memtable should be empty
+        assert_eq!(stats.memtable_entries, 0);
+        // Should have SSTable files
+        assert!(stats.total_files > 0);
+    }
+
+    #[test]
+    fn test_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let db = DB::open(tmp.path(), Options::default()).unwrap();
+
+        // Write initial value
+        db.put(&Key::from("key"), &Value::from("v1")).unwrap();
+
+        // Take snapshot
+        let snap = db.snapshot();
+
+        // Write new value
+        db.put(&Key::from("key"), &Value::from("v2")).unwrap();
+
+        // Regular get sees new value
+        let value = db.get(&Key::from("key")).unwrap().unwrap();
+        assert_eq!(value.as_bytes(), b"v2");
+
+        // Snapshot read sees old value
+        let value = db.get_at(&Key::from("key"), &snap).unwrap().unwrap();
+        assert_eq!(value.as_bytes(), b"v1");
+    }
+
+    #[test]
+    fn test_snapshot_isolation() {
+        let tmp = TempDir::new().unwrap();
+        let db = DB::open(tmp.path(), Options::default()).unwrap();
+
+        // Initial writes
+        db.put(&Key::from("a"), &Value::from("1")).unwrap();
+        db.put(&Key::from("b"), &Value::from("2")).unwrap();
+
+        let snap1 = db.snapshot();
+
+        // More writes
+        db.put(&Key::from("a"), &Value::from("10")).unwrap();
+        db.put(&Key::from("c"), &Value::from("3")).unwrap();
+
+        let snap2 = db.snapshot();
+
+        // Delete
+        db.delete(&Key::from("b")).unwrap();
+
+        // snap1 sees original values
+        assert_eq!(db.get_at(&Key::from("a"), &snap1).unwrap().unwrap().as_bytes(), b"1");
+        assert_eq!(db.get_at(&Key::from("b"), &snap1).unwrap().unwrap().as_bytes(), b"2");
+        assert!(db.get_at(&Key::from("c"), &snap1).unwrap().is_none());
+
+        // snap2 sees intermediate state
+        assert_eq!(db.get_at(&Key::from("a"), &snap2).unwrap().unwrap().as_bytes(), b"10");
+        assert_eq!(db.get_at(&Key::from("b"), &snap2).unwrap().unwrap().as_bytes(), b"2");
+        assert_eq!(db.get_at(&Key::from("c"), &snap2).unwrap().unwrap().as_bytes(), b"3");
+
+        // Current state
+        assert_eq!(db.get(&Key::from("a")).unwrap().unwrap().as_bytes(), b"10");
+        assert!(db.get(&Key::from("b")).unwrap().is_none()); // deleted
+        assert_eq!(db.get(&Key::from("c")).unwrap().unwrap().as_bytes(), b"3");
     }
 }

@@ -134,9 +134,28 @@ fn run_repl(path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "stats" => {
+                let stats = db.stats();
                 println!("Database: {}", path);
                 println!("Status: Open");
-                // TODO: Add more stats when available
+                println!();
+                println!("MemTable:");
+                println!("  Entries: {}", stats.memtable_entries);
+                println!("  Size: {} bytes", stats.memtable_size);
+                if stats.immutable_memtable {
+                    println!("  Immutable: yes (pending flush)");
+                }
+                println!();
+                println!("Levels:");
+                if stats.levels.is_empty() {
+                    println!("  (no SSTables yet)");
+                } else {
+                    for level in &stats.levels {
+                        println!("  L{}: {} files, {} bytes", 
+                            level.level, level.num_files, level.total_bytes);
+                    }
+                }
+                println!();
+                println!("Total SSTable files: {}", stats.total_files);
             }
             "quit" | "exit" | "q" => {
                 println!("Goodbye!");

@@ -343,6 +343,7 @@ pub struct Manifest {
     /// Database directory.
     db_path: PathBuf,
     /// Current manifest file number.
+    #[allow(dead_code)]
     manifest_number: u64,
     /// Manifest file writer.
     manifest_file: Option<File>,

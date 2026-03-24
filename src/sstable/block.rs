@@ -424,12 +424,12 @@ mod tests {
         let block = Block::new(data).unwrap();
 
         // Seek to existing key
-        let mut iter = block.seek(&Key::from("key050"));
+        let iter = block.seek(&Key::from("key050"));
         assert!(iter.valid());
         assert_eq!(iter.key(), b"key050");
 
         // Seek to non-existing key (should land on next)
-        let mut iter = block.seek(&Key::from("key050a"));
+        let iter = block.seek(&Key::from("key050a"));
         assert!(iter.valid());
         assert_eq!(iter.key(), b"key051");
     }

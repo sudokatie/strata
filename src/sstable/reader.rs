@@ -15,6 +15,7 @@ pub struct SSTableReader {
     file: File,
     index_block: Block,
     bloom_filter: Option<BloomFilter>,
+    #[allow(dead_code)]
     file_size: u64,
 }
 
