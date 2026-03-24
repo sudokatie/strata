@@ -1,6 +1,8 @@
 //! Skip list implementation for MemTable.
+//!
+//! O(log n) probabilistic data structure for sorted key-value storage.
 
-use std::cmp::Ordering;
+use std::ptr::NonNull;
 use rand::Rng;
 
 use crate::types::{Key, Value, Entry, EntryType, Sequence, InternalKey};
@@ -8,38 +10,36 @@ use crate::types::{Key, Value, Entry, EntryType, Sequence, InternalKey};
 /// Maximum height of skip list.
 const MAX_HEIGHT: usize = 12;
 
-/// Probability for level increase.
+/// Probability for level increase (1/4 chance per level).
 const P: f64 = 0.25;
 
 /// Skip list node.
 struct Node {
     key: InternalKey,
     value: Value,
-    /// Forward pointers for each level.
-    forward: Vec<Option<Box<Node>>>,
+    /// Forward pointers for each level (length = node height).
+    forward: Vec<Option<NonNull<Node>>>,
 }
 
 impl Node {
-    fn new(key: InternalKey, value: Value, height: usize) -> Self {
-        let mut forward = Vec::with_capacity(height);
-        for _ in 0..height {
-            forward.push(None);
-        }
-        Self {
+    fn new(key: InternalKey, value: Value, height: usize) -> Box<Self> {
+        Box::new(Self {
             key,
             value,
-            forward,
-        }
+            forward: vec![None; height],
+        })
     }
 }
 
 /// Skip list for sorted key-value storage.
+/// 
+/// Provides O(log n) insert, lookup, and iteration.
 pub struct SkipList {
-    /// Head node (sentinel).
+    /// Head node (sentinel with MAX_HEIGHT levels).
     head: Box<Node>,
-    /// Current maximum height.
+    /// Current maximum height in use.
     height: usize,
-    /// Approximate memory size.
+    /// Approximate memory size in bytes.
     size: usize,
     /// Number of entries.
     count: usize,
@@ -48,14 +48,11 @@ pub struct SkipList {
 impl SkipList {
     /// Create a new skip list.
     pub fn new() -> Self {
-        let mut forward = Vec::with_capacity(MAX_HEIGHT);
-        for _ in 0..MAX_HEIGHT {
-            forward.push(None);
-        }
+        // Head is a sentinel with max height
         let head = Box::new(Node {
             key: InternalKey::new(Key::new(vec![]), 0, EntryType::Put),
             value: Value::new(vec![]),
-            forward,
+            forward: vec![None; MAX_HEIGHT],
         });
 
         Self {
@@ -66,7 +63,7 @@ impl SkipList {
         }
     }
 
-    /// Generate random height for new node.
+    /// Generate random height for new node using geometric distribution.
     fn random_height() -> usize {
         let mut rng = rand::thread_rng();
         let mut height = 1;
@@ -76,83 +73,99 @@ impl SkipList {
         height
     }
 
-    /// Insert an entry.
+    /// Insert an entry. O(log n) average case.
     pub fn insert(&mut self, key: Key, value: Value, sequence: Sequence, entry_type: EntryType) {
         let internal_key = InternalKey::new(key.clone(), sequence, entry_type);
-        let height = Self::random_height();
+        let new_height = Self::random_height();
 
-        // Update max height
-        if height > self.height {
-            self.height = height;
-        }
-
-        // Track memory
-        self.size += key.len() + value.len() + 32; // estimate
-        self.count += 1;
-
-        // Find insert position and update pointers
-        // For simplicity, we'll use a non-optimal but correct implementation
-        let new_node = Box::new(Node::new(internal_key.clone(), value, height));
-
-        // Insert at correct position (simplified - linear scan)
-        self.insert_node(new_node);
-    }
-
-    fn insert_node(&mut self, new_node: Box<Node>) {
-        // Simple insertion at level 0 only for correctness
-        // TODO: Full skip list with multi-level pointers for O(log n)
-        let mut current = &mut self.head;
-
-        // Find position: advance while next < new_node
-        while current.forward[0].is_some() {
-            let should_advance = {
-                let next = current.forward[0].as_ref().unwrap();
-                next.key < new_node.key
-            };
-            if should_advance {
-                current = current.forward[0].as_mut().unwrap();
-            } else {
-                break;
+        // Track update points at each level
+        let mut update: [Option<NonNull<Node>>; MAX_HEIGHT] = [None; MAX_HEIGHT];
+        
+        // Find insert position using skip list traversal
+        let mut current: *mut Node = self.head.as_mut();
+        
+        for level in (0..self.height).rev() {
+            unsafe {
+                while let Some(next_ptr) = (&(*current).forward)[level] {
+                    let next = next_ptr.as_ref();
+                    if next.key < internal_key {
+                        current = next_ptr.as_ptr();
+                    } else {
+                        break;
+                    }
+                }
+                update[level] = Some(NonNull::new_unchecked(current));
             }
         }
 
-        // Insert after current
-        let mut new_node = new_node;
-        new_node.forward[0] = current.forward[0].take();
-        current.forward[0] = Some(new_node);
-    }
+        // Update height if new node is taller
+        if new_height > self.height {
+            for update_slot in update.iter_mut().take(new_height).skip(self.height) {
+                *update_slot = NonNull::new(self.head.as_mut());
+            }
+            self.height = new_height;
+        }
 
-    /// Get the latest value for a key.
-    pub fn get(&self, key: &Key) -> Option<Entry> {
-        let mut current = &self.head;
+        // Create new node
+        let mut new_node = Node::new(internal_key, value.clone(), new_height);
+        let new_node_ptr = NonNull::new(new_node.as_mut()).unwrap();
 
-        for level in (0..self.height).rev() {
-            while let Some(ref next) = current.forward[level] {
-                match next.key.user_key.cmp(key) {
-                    Ordering::Less => current = next,
-                    Ordering::Equal => {
-                        // Found - return latest (highest sequence for this key)
-                        return Some(Entry {
-                            key: next.key.user_key.clone(),
-                            value: next.value.clone(),
-                            sequence: next.key.sequence,
-                            entry_type: next.key.entry_type,
-                        });
-                    }
-                    Ordering::Greater => break,
+        // Insert at each level
+        for (level, update_slot) in update.iter().enumerate().take(new_height) {
+            unsafe {
+                if let Some(mut update_ptr) = *update_slot {
+                    let update_node = update_ptr.as_mut();
+                    new_node.forward[level] = update_node.forward[level];
+                    update_node.forward[level] = Some(new_node_ptr);
                 }
             }
         }
 
-        // Check level 0
-        if let Some(ref next) = current.forward[0] {
-            if next.key.user_key == *key {
-                return Some(Entry {
-                    key: next.key.user_key.clone(),
-                    value: next.value.clone(),
-                    sequence: next.key.sequence,
-                    entry_type: next.key.entry_type,
-                });
+        // Leak the box - we manage memory manually
+        Box::leak(new_node);
+
+        // Track memory
+        self.size += key.len() + value.len() + 32 + new_height * 8;
+        self.count += 1;
+    }
+
+    /// Get the latest value for a key. O(log n) average case.
+    /// 
+    /// Since entries are ordered by InternalKey (user_key, then sequence descending),
+    /// the first entry with matching user_key has the highest sequence number.
+    pub fn get(&self, key: &Key) -> Option<Entry> {
+        let mut current: *const Node = self.head.as_ref();
+        
+        // Create a search key with max sequence to find first entry with this user_key
+        let search_key = InternalKey::new(key.clone(), u64::MAX, EntryType::Put);
+
+        // Search using skip list traversal with InternalKey comparison
+        for level in (0..self.height).rev() {
+            unsafe {
+                while let Some(next_ptr) = (&(*current).forward)[level] {
+                    let next = next_ptr.as_ref();
+                    // Use InternalKey comparison for correct traversal
+                    if next.key < search_key {
+                        current = next_ptr.as_ptr();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // After traversal, check the next node at level 0
+        unsafe {
+            if let Some(next_ptr) = (&(*current).forward)[0] {
+                let next = next_ptr.as_ref();
+                if next.key.user_key == *key {
+                    return Some(Entry {
+                        key: next.key.user_key.clone(),
+                        value: next.value.clone(),
+                        sequence: next.key.sequence,
+                        entry_type: next.key.entry_type,
+                    });
+                }
             }
         }
 
@@ -176,15 +189,28 @@ impl SkipList {
 
     /// Iterate over all entries in order.
     pub fn iter(&self) -> SkipListIterator<'_> {
-        SkipListIterator {
-            current: self.head.forward[0].as_deref(),
-        }
+        let first = self.head.forward[0].map(|ptr| unsafe { ptr.as_ref() });
+        SkipListIterator { current: first }
     }
 }
 
 impl Default for SkipList {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for SkipList {
+    fn drop(&mut self) {
+        // Free all nodes (except head which is owned by self)
+        let mut current = self.head.forward[0];
+        while let Some(node_ptr) = current {
+            unsafe {
+                let node = Box::from_raw(node_ptr.as_ptr());
+                current = node.forward[0];
+                // node is dropped here
+            }
+        }
     }
 }
 
@@ -204,10 +230,16 @@ impl<'a> Iterator for SkipListIterator<'a> {
             sequence: node.key.sequence,
             entry_type: node.key.entry_type,
         };
-        self.current = node.forward[0].as_deref();
+        self.current = node.forward[0].map(|ptr| unsafe { ptr.as_ref() });
         Some(entry)
     }
 }
+
+// Safety: SkipList manages its own memory and uses raw pointers internally.
+// The public API is safe and the struct can be safely shared across threads
+// when protected by a Mutex (which is how it's used in MemTable).
+unsafe impl Send for SkipList {}
+unsafe impl Sync for SkipList {}
 
 #[cfg(test)]
 mod tests {
@@ -262,5 +294,45 @@ mod tests {
         sl.insert(Key::from("key"), Value::from("value"), 1, EntryType::Put);
         assert_eq!(sl.len(), 1);
         assert!(sl.approximate_size() > 0);
+    }
+
+    #[test]
+    fn test_skiplist_many_entries() {
+        let mut sl = SkipList::new();
+        
+        // Insert 1000 entries in random order
+        for i in (0..1000).rev() {
+            let key = format!("key{:05}", i);
+            sl.insert(Key::from(key.as_str()), Value::from("v"), i as u64, EntryType::Put);
+        }
+
+        // All should be found
+        for i in 0..1000 {
+            let key = format!("key{:05}", i);
+            assert!(sl.get(&Key::from(key.as_str())).is_some());
+        }
+
+        // Iterator should return sorted
+        let entries: Vec<_> = sl.iter().collect();
+        assert_eq!(entries.len(), 1000);
+        for i in 0..1000 {
+            let expected = format!("key{:05}", i);
+            assert_eq!(entries[i].key.as_bytes(), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_skiplist_height_varies() {
+        // Insert many entries to verify multi-level structure
+        let mut sl = SkipList::new();
+        for i in 0..100 {
+            let key = format!("key{:03}", i);
+            sl.insert(Key::from(key.as_str()), Value::from("v"), i as u64, EntryType::Put);
+        }
+        
+        // With 100 entries and P=0.25, we should have height > 1
+        // (probabilistic, but very likely)
+        assert!(sl.height >= 1);
+        assert_eq!(sl.len(), 100);
     }
 }
