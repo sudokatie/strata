@@ -4,6 +4,7 @@
 //! workloads with good read performance through compaction.
 
 pub mod bloom;
+pub mod compression;
 pub mod error;
 pub mod types;
 pub mod options;
@@ -15,6 +16,7 @@ pub mod manifest;
 pub mod db;
 
 pub use bloom::{BloomFilter, BloomFilterBuilder};
+pub use compression::CompressionStats;
 pub use error::{Error, Result};
 pub use types::{Key, Value, Entry, EntryType, Sequence};
 pub use options::{Options, ReadOptions, WriteOptions, Compression};

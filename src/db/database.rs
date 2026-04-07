@@ -288,6 +288,10 @@ impl DB {
             immutable_memtable: imm.is_some(),
             levels: level_stats,
             total_files: version.num_files(),
+            // Compression stats (set when compression is enabled)
+            compression_ratio: 1.0,
+            compression_raw_bytes: 0,
+            compression_compressed_bytes: 0,
         }
     }
 
@@ -406,6 +410,12 @@ pub struct DBStats {
     pub levels: Vec<LevelStats>,
     /// Total number of SSTable files.
     pub total_files: usize,
+    /// Compression statistics.
+    pub compression_ratio: f64,
+    /// Total raw bytes before compression.
+    pub compression_raw_bytes: u64,
+    /// Total compressed bytes.
+    pub compression_compressed_bytes: u64,
 }
 
 impl Drop for DB {

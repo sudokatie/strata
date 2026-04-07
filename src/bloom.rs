@@ -3,7 +3,6 @@
 //! Bloom filters provide probabilistic set membership testing, allowing
 //! us to skip disk reads when a key definitely doesn't exist.
 
-use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 
 /// Bloom filter for key existence testing.
@@ -37,7 +36,7 @@ impl BloomFilter {
         let num_hashes = num_hashes.clamp(1, 30);
         
         // Round up to 64-bit words
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         
         BloomFilter {
             bits: vec![0; num_words],
@@ -48,7 +47,7 @@ impl BloomFilter {
 
     /// Create a bloom filter with explicit parameters.
     pub fn with_params(num_bits: usize, num_hashes: u32) -> Self {
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         BloomFilter {
             bits: vec![0; num_words],
             num_bits: num_words * 64,
@@ -127,7 +126,7 @@ impl BloomFilter {
         let num_bits = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
         let num_hashes = u32::from_le_bytes(data[4..8].try_into().ok()?);
         
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         let expected_len = 8 + num_words * 8;
         
         if data.len() < expected_len {
@@ -163,7 +162,7 @@ impl BloomFilter {
         let num_bits = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
         let num_hashes = u32::from_le_bytes(header[4..8].try_into().unwrap());
         
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         let mut bits = Vec::with_capacity(num_words);
         
         for _ in 0..num_words {
