@@ -175,26 +175,32 @@ impl Block {
     pub fn seek(&self, target: &Key) -> BlockIterator<'_> {
         let target_bytes = target.as_bytes();
 
-        // Binary search over restart points
+        // Binary search to find the restart point that contains or precedes target
+        // We want to find the largest restart point where key <= target
         let mut left = 0;
         let mut right = self.num_restarts;
 
         while left < right {
-            let mid = left + (right - left).div_ceil(2);
+            // Use floor division to avoid accessing out-of-bounds indices
+            let mid = left + (right - left) / 2;
             let restart_offset = self.restart(mid);
 
             // Decode key at restart point (full key, no shared prefix)
             let (key, _) = self.decode_entry_at(restart_offset).unwrap_or_default();
 
             if key.as_slice() < target_bytes {
-                left = mid;
+                // Mid is too small, search right half (but keep mid as candidate)
+                left = mid + 1;
             } else {
-                right = mid - 1;
+                // Mid is >= target, search left half
+                right = mid;
             }
         }
 
-        // Linear search from restart point
-        let start_offset = self.restart(left);
+        // left is now the first restart point with key >= target
+        // We want to start from the previous restart point (or 0 if left is 0)
+        let start_idx = if left > 0 { left - 1 } else { 0 };
+        let start_offset = self.restart(start_idx);
         let mut offset = start_offset;
         let mut key = Vec::new();
 

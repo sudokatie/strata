@@ -4,11 +4,12 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::compression::decompress;
 use crate::types::{Key, Value};
 use crate::Result;
 use super::block::Block;
 use super::bloom::BloomFilter;
-use super::builder::{parse_footer, FOOTER_SIZE};
+use super::builder::{parse_footer, FOOTER_SIZE, BLOCK_HEADER_SIZE};
 
 /// SSTable reader.
 pub struct SSTableReader {
@@ -105,14 +106,21 @@ impl SSTableReader {
     }
 
     fn read_block(&mut self, offset: u64) -> Result<Block> {
-        // Calculate block size (read until next block or index)
-        // For simplicity, read a fixed max size and let Block handle it
-        const MAX_BLOCK_SIZE: usize = 64 * 1024;
-
         self.file.seek(SeekFrom::Start(offset))?;
-        let mut data = vec![0u8; MAX_BLOCK_SIZE];
-        let n = self.file.read(&mut data)?;
-        data.truncate(n);
+
+        // Read block header: [compression_type: u8][compressed_size: u32]
+        let mut header = [0u8; BLOCK_HEADER_SIZE];
+        self.file.read_exact(&mut header)?;
+
+        let compression_type = header[0];
+        let compressed_size = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+
+        // Read compressed data
+        let mut compressed_data = vec![0u8; compressed_size];
+        self.file.read_exact(&mut compressed_data)?;
+
+        // Decompress
+        let data = decompress(&compressed_data, compression_type)?;
 
         Block::new(data)
     }
@@ -179,6 +187,7 @@ impl Iterator for SSTableIterator<'_> {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -260,5 +269,44 @@ mod tests {
 
         // Most non-existent keys should fail bloom filter
         // (some false positives expected)
+    }
+
+    #[test]
+    fn test_compression_roundtrip() {
+        use crate::options::Compression;
+        
+        // Test with Snappy compression
+        // Keys must be in sorted order
+        let tmp = NamedTempFile::new().unwrap();
+        let mut builder = SSTableBuilder::with_compression(tmp.path(), Compression::Snappy).unwrap();
+        builder.add(&Key::from("bar"), &Value::from("barval")).unwrap();
+        builder.add(&Key::from("foo"), &Value::from("fooval")).unwrap();
+        builder.add(&Key::from("hello"), &Value::from("world")).unwrap();
+        builder.finish().unwrap();
+
+        let mut reader = SSTableReader::open(tmp.path()).unwrap();
+        let value = reader.get(&Key::from("hello")).unwrap().unwrap();
+        assert_eq!(value.as_bytes(), b"world");
+        let value = reader.get(&Key::from("foo")).unwrap().unwrap();
+        assert_eq!(value.as_bytes(), b"fooval");
+    }
+
+    #[test]
+    fn test_zstd_compression() {
+        use crate::options::Compression;
+        
+        let tmp = NamedTempFile::new().unwrap();
+        let mut builder = SSTableBuilder::with_compression(tmp.path(), Compression::Zstd).unwrap();
+        
+        for i in 0..50 {
+            let key = format!("key{:03}", i);
+            let value = format!("value{}", i);
+            builder.add(&Key::from(key.as_str()), &Value::from(value.as_str())).unwrap();
+        }
+        builder.finish().unwrap();
+
+        let mut reader = SSTableReader::open(tmp.path()).unwrap();
+        let value = reader.get(&Key::from("key025")).unwrap().unwrap();
+        assert_eq!(value.as_bytes(), b"value25");
     }
 }

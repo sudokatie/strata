@@ -23,6 +23,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+use crate::compression::{compress, CompressionStats};
+use crate::options::Compression;
 use crate::types::{Key, Value};
 use crate::Result;
 use super::block::{BlockBuilder, BLOCK_SIZE};
@@ -34,6 +36,9 @@ const MAGIC: u64 = 0x5354524154414442; // "STRATADB"
 /// Footer size in bytes.
 pub const FOOTER_SIZE: usize = 48;
 
+/// Block header size (compression type + compressed size).
+pub const BLOCK_HEADER_SIZE: usize = 5;
+
 /// SSTable builder.
 pub struct SSTableBuilder {
     writer: BufWriter<File>,
@@ -43,11 +48,18 @@ pub struct SSTableBuilder {
     pending_index_entry: Option<(Key, u64)>,
     offset: u64,
     num_entries: usize,
+    compression: Compression,
+    stats: CompressionStats,
 }
 
 impl SSTableBuilder {
     /// Create a new SSTable builder.
     pub fn new(path: &Path) -> Result<Self> {
+        Self::with_compression(path, Compression::None)
+    }
+
+    /// Create a new SSTable builder with compression.
+    pub fn with_compression(path: &Path, compression: Compression) -> Result<Self> {
         let file = File::create(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
@@ -57,7 +69,14 @@ impl SSTableBuilder {
             pending_index_entry: None,
             offset: 0,
             num_entries: 0,
+            compression,
+            stats: CompressionStats::new(),
         })
+    }
+
+    /// Get compression statistics.
+    pub fn compression_stats(&self) -> &CompressionStats {
+        &self.stats
     }
 
     /// Add a key-value pair. Keys must be added in sorted order.
@@ -123,9 +142,18 @@ impl SSTableBuilder {
         // Build and write block
         let mut block = BlockBuilder::new();
         std::mem::swap(&mut block, &mut self.data_block);
-        let data = block.finish();
+        let raw_data = block.finish();
 
-        self.writer.write_all(&data)?;
+        // Compress the block
+        let (compressed_data, compression_type) = compress(&raw_data, self.compression)?;
+
+        // Track compression stats
+        self.stats.record_compress(raw_data.len(), compressed_data.len());
+
+        // Write block header: [compression_type: u8][compressed_size: u32]
+        self.writer.write_all(&[compression_type])?;
+        self.writer.write_all(&(compressed_data.len() as u32).to_le_bytes())?;
+        self.writer.write_all(&compressed_data)?;
 
         // Add index entry for this block
         if let Some((key, offset)) = self.pending_index_entry.take() {
@@ -134,7 +162,8 @@ impl SSTableBuilder {
             self.index_block.add(&key, &Value::new(offset_bytes.to_vec()));
         }
 
-        self.offset += data.len() as u64;
+        // Update offset: header (5 bytes) + compressed data
+        self.offset += (BLOCK_HEADER_SIZE + compressed_data.len()) as u64;
         Ok(())
     }
 
