@@ -19,5 +19,5 @@ pub use bloom::{BloomFilter, BloomFilterBuilder};
 pub use compression::CompressionStats;
 pub use error::{Error, Result};
 pub use types::{Key, Value, Entry, EntryType, Sequence};
-pub use options::{Options, ReadOptions, WriteOptions, Compression};
+pub use options::{Options, ReadOptions, WriteOptions, Compression, PerLevelCompression};
 pub use db::{DB, DBStats, LevelStats, Snapshot};

@@ -12,6 +12,73 @@ pub enum Compression {
     Zstd,
 }
 
+/// Per-level compression configuration.
+///
+/// Allows different compression algorithms for different LSM levels.
+/// Common strategy: fast compression (Snappy) for L0-L2, better ratio (Zstd) for L3+.
+#[derive(Debug, Clone)]
+pub struct PerLevelCompression {
+    /// Compression per level. Index = level number.
+    levels: Vec<Compression>,
+    /// Default compression for levels not explicitly configured.
+    default: Compression,
+}
+
+impl Default for PerLevelCompression {
+    fn default() -> Self {
+        Self {
+            levels: Vec::new(),
+            default: Compression::None,
+        }
+    }
+}
+
+impl PerLevelCompression {
+    /// Create with a default compression for all levels.
+    pub fn new(default: Compression) -> Self {
+        Self {
+            levels: Vec::new(),
+            default,
+        }
+    }
+
+    /// Set compression for a specific level.
+    pub fn set_level(mut self, level: usize, compression: Compression) -> Self {
+        if level >= self.levels.len() {
+            self.levels.resize(level + 1, self.default);
+        }
+        self.levels[level] = compression;
+        self
+    }
+
+    /// Get compression for a level.
+    pub fn for_level(&self, level: usize) -> Compression {
+        self.levels.get(level).copied().unwrap_or(self.default)
+    }
+
+    /// Create a balanced configuration: Snappy for L0-L2, Zstd for deeper levels.
+    pub fn balanced() -> Self {
+        Self {
+            levels: vec![
+                Compression::Snappy, // L0
+                Compression::Snappy, // L1
+                Compression::Snappy, // L2
+            ],
+            default: Compression::Zstd,
+        }
+    }
+
+    /// Create a fast configuration: Snappy everywhere.
+    pub fn fast() -> Self {
+        Self::new(Compression::Snappy)
+    }
+
+    /// Create a compact configuration: Zstd everywhere.
+    pub fn compact() -> Self {
+        Self::new(Compression::Zstd)
+    }
+}
+
 /// Database options.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -27,8 +94,10 @@ pub struct Options {
     pub level_ratio: usize,
     /// Maximum number of levels (default 7).
     pub max_levels: usize,
-    /// Compression algorithm.
+    /// Compression algorithm (default for all levels).
     pub compression: Compression,
+    /// Per-level compression configuration (overrides `compression` when set).
+    pub per_level_compression: Option<PerLevelCompression>,
     /// Create database if missing.
     pub create_if_missing: bool,
     /// Error if database exists.
@@ -49,6 +118,7 @@ impl Default for Options {
             level_ratio: 10,
             max_levels: 7,
             compression: Compression::None,
+            per_level_compression: None,
             create_if_missing: true,
             error_if_exists: false,
             write_buffer_size: 4 * 1024 * 1024,   // 4MB
@@ -75,9 +145,15 @@ impl Options {
         self
     }
 
-    /// Set compression.
+    /// Set compression (applies to all levels).
     pub fn compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Set per-level compression configuration.
+    pub fn per_level_compression(mut self, config: PerLevelCompression) -> Self {
+        self.per_level_compression = Some(config);
         self
     }
 
@@ -85,6 +161,17 @@ impl Options {
     pub fn create_if_missing(mut self, create: bool) -> Self {
         self.create_if_missing = create;
         self
+    }
+
+    /// Get compression for a specific level.
+    ///
+    /// Uses per-level configuration if set, otherwise falls back to global compression.
+    pub fn compression_for_level(&self, level: usize) -> Compression {
+        if let Some(ref per_level) = self.per_level_compression {
+            per_level.for_level(level)
+        } else {
+            self.compression
+        }
     }
 }
 
@@ -164,5 +251,69 @@ mod tests {
     fn test_write_options() {
         let opts = WriteOptions::new().sync(true);
         assert!(opts.sync);
+    }
+
+    #[test]
+    fn test_per_level_compression_default() {
+        let config = PerLevelCompression::new(Compression::Snappy);
+        assert_eq!(config.for_level(0), Compression::Snappy);
+        assert_eq!(config.for_level(5), Compression::Snappy);
+        assert_eq!(config.for_level(100), Compression::Snappy);
+    }
+
+    #[test]
+    fn test_per_level_compression_set_level() {
+        let config = PerLevelCompression::new(Compression::None)
+            .set_level(0, Compression::Snappy)
+            .set_level(3, Compression::Zstd);
+
+        assert_eq!(config.for_level(0), Compression::Snappy);
+        assert_eq!(config.for_level(1), Compression::None);
+        assert_eq!(config.for_level(2), Compression::None);
+        assert_eq!(config.for_level(3), Compression::Zstd);
+        assert_eq!(config.for_level(4), Compression::None);
+    }
+
+    #[test]
+    fn test_per_level_compression_balanced() {
+        let config = PerLevelCompression::balanced();
+        assert_eq!(config.for_level(0), Compression::Snappy);
+        assert_eq!(config.for_level(1), Compression::Snappy);
+        assert_eq!(config.for_level(2), Compression::Snappy);
+        assert_eq!(config.for_level(3), Compression::Zstd);
+        assert_eq!(config.for_level(6), Compression::Zstd);
+    }
+
+    #[test]
+    fn test_per_level_compression_fast() {
+        let config = PerLevelCompression::fast();
+        assert_eq!(config.for_level(0), Compression::Snappy);
+        assert_eq!(config.for_level(5), Compression::Snappy);
+    }
+
+    #[test]
+    fn test_per_level_compression_compact() {
+        let config = PerLevelCompression::compact();
+        assert_eq!(config.for_level(0), Compression::Zstd);
+        assert_eq!(config.for_level(5), Compression::Zstd);
+    }
+
+    #[test]
+    fn test_options_compression_for_level_global() {
+        let opts = Options::new().compression(Compression::Zstd);
+        assert_eq!(opts.compression_for_level(0), Compression::Zstd);
+        assert_eq!(opts.compression_for_level(3), Compression::Zstd);
+    }
+
+    #[test]
+    fn test_options_compression_for_level_per_level() {
+        let opts = Options::new()
+            .compression(Compression::None)
+            .per_level_compression(PerLevelCompression::balanced());
+
+        assert_eq!(opts.compression_for_level(0), Compression::Snappy);
+        assert_eq!(opts.compression_for_level(2), Compression::Snappy);
+        assert_eq!(opts.compression_for_level(3), Compression::Zstd);
+        assert_eq!(opts.compression_for_level(6), Compression::Zstd);
     }
 }
